@@ -1456,3 +1456,25 @@ test('a refreshed grant while live is already active only extends the validity p
     else globalThis.window = originalWindow
   }
 })
+
+test('a dangerous.confirm EVENT never perturbs an active live projection', async () => {
+  const { session, controller } = makeController(op => (op === 'live.subscribe' ? { outcome: 'APPLIED', payload: {} } : { outcome: 'UNAVAILABLE' }), {
+    ops: [...GRANT_OPS, 'live.subscribe'],
+  })
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'unavailable'), true)
+  session.emit({ kind: 'event', event: { payload: { stream: 'live', stream_seq: 1, data: { server_now_ms: Date.now(), events: [{ sequence: 1, timestamp_ms: Date.now() - 1000, track_id: 1, direction: 'in', target_class: 'person' }] } } } })
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
+  const before = controller.getState().events.value.events.map(event => event.sequence)
+
+  session.emit({
+    kind: 'event',
+    event: { payload: { stream: 'dangerous.confirm', stream_seq: 2, data: { op: 'counters.reset' } } },
+  })
+  assert.equal(controller.getState().events.state, 'available', 'non-live broker notification must not fail the live projection')
+  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), before)
+
+  session.emit({ kind: 'event', event: { payload: { stream: 'live', stream_seq: 3, data: { server_now_ms: Date.now(), events: [{ sequence: 2, timestamp_ms: Date.now() - 500, track_id: 2, direction: 'out', target_class: 'person' }] } } } })
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
+  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [2, 1], 'live events continue processing after a confirm notification')
+})

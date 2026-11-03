@@ -402,6 +402,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
 
     const onLiveEvent = (event: BridgeEvent) => {
         if (livePhase !== 'active') return;
+        if (event.payload.stream !== 'live') return;
         if (event.payload.status === 'REVOKE') {
             livePhase = 'failed';
             liveReason = 'Host revoked the live stream';
