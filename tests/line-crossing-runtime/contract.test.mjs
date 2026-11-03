@@ -140,6 +140,8 @@ test('frozen bridge v1 constants match the cross-repo wire freeze', () => {
   assert.equal(runtime.MAX_MESSAGE_BYTES, 16384)
   assert.equal(runtime.MAX_PENDING_REQUESTS, 4)
   assert.equal(runtime.REQUEST_DEADLINE_MS, 10000)
+  assert.equal(runtime.CONFIRM_REQUEST_DEADLINE_MS, 120000)
+  assert.deepEqual([...runtime.CONFIRM_WAIT_OPS], ['counters.reset', 'enable.apply'])
 })
 
 test('identity validation is strict about schema, digests and generation counters', () => {
@@ -331,6 +333,62 @@ test('mismatched request ids and ops are ignored and keep the original pending u
   })
   const outcome = await pending
   assert.equal(outcome.outcome, 'UNKNOWN')
+})
+
+test('confirm-wait ops extend the request deadline past the host confirm TTL', async () => {
+  const timeouts = []
+  const { session, port } = authorized({ ops: ['counters.reset', 'snapshot.read'] }, {
+    setTimeoutFn: (_handler, timeout) => {
+      timeouts.push(timeout)
+      return timeouts.length
+    },
+    clearTimeoutFn: () => {},
+  })
+  session.request('snapshot.read')
+  await flushMicrotasks()
+  session.request('counters.reset', { session_generation: 8 })
+  await flushMicrotasks()
+  assert.equal(port.sent.length, 2)
+  assert.deepEqual(timeouts, [runtime.REQUEST_DEADLINE_MS, runtime.CONFIRM_REQUEST_DEADLINE_MS])
+})
+
+test('a REJECTED ADMIN_CONFIRM_REQUIRED on counters.reset keeps the request pending for the follow-up RESULT', async () => {
+  const { session, port } = authorized({ ops: ['counters.reset'] })
+  const reset = session.request('counters.reset', { session_generation: 8 })
+  await flushMicrotasks()
+  const requestId = port.sent[0].request_id
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 3, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestId, op: 'counters.reset',
+    outcome: 'REJECTED', payload: { reason: 'ADMIN_CONFIRM_REQUIRED' },
+  })
+  await flushMicrotasks()
+  let settled = false
+  reset.then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(settled, false, 'the confirm-wait request must stay pending across the admin confirm window')
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 4, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestId, op: 'counters.reset',
+    outcome: 'APPLIED', payload: { session_generation: 8 },
+  })
+  const outcome = await reset
+  assert.equal(outcome.outcome, 'APPLIED')
+  assert.deepEqual(outcome.payload, { session_generation: 8 })
+})
+
+test('ADMIN_CONFIRM_REQUIRED stays final for ops outside the confirm-wait set', async () => {
+  const { session, port } = authorized({ ops: ['snapshot.read'] })
+  const read = session.request('snapshot.read')
+  await flushMicrotasks()
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 3, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: port.sent[0].request_id, op: 'snapshot.read',
+    outcome: 'REJECTED', payload: { reason: 'ADMIN_CONFIRM_REQUIRED' },
+  })
+  const outcome = await read
+  assert.equal(outcome.outcome, 'REJECTED')
+  assert.equal(outcome.reason, 'ADMIN_CONFIRM_REQUIRED')
 })
 
 test('replayed sequence numbers are dropped while fresh traffic continues', async () => {
@@ -932,6 +990,70 @@ test('resetStats re-reads the authoritative snapshot after an APPLIED reset', as
   const outcome = await controller.capabilities.resetStats({ sessionGeneration: 8 })
   assert.equal(outcome.outcome, 'APPLIED')
   assert.equal(controller.getState().stats.value.total.in, 0)
+})
+
+test('resetStats stays pending through an ADMIN_CONFIRM_REQUIRED rejection until the follow-up RESULT settles it', async () => {
+  const session = new runtime.BridgeSession()
+  const port = new FakePort()
+  assert.equal(session.acceptHello(makeHello(), port), true)
+  const controller = runtime.createRuntimeController(session, { pollIntervalMs: 0 })
+  port.emit(makeGrant({ seq: 2, ops: GRANT_OPS, expires_at_ms: Date.now() + 600000 }))
+  await flushMicrotasks()
+  const refreshRequests = port.sent.filter(request => ['snapshot.read', 'report-policy.read', 'enable.read'].includes(request.op))
+  assert.equal(refreshRequests.length, 3)
+  const requestIdOf = op => refreshRequests.find(request => request.op === op).request_id
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 3, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestIdOf('snapshot.read'), op: 'snapshot.read',
+    outcome: 'APPLIED', payload: bridgeSnapshot(),
+  })
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 4, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestIdOf('report-policy.read'), op: 'report-policy.read',
+    outcome: 'UNAVAILABLE', payload: { reason: 'not implemented' },
+  })
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 5, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestIdOf('enable.read'), op: 'enable.read',
+    outcome: 'UNAVAILABLE', payload: { reason: 'not implemented' },
+  })
+  assert.equal(await waitAuthored(controller), true)
+
+  let settledEarly = false
+  const resetPending = controller.capabilities.resetStats({ sessionGeneration: 8 })
+  resetPending.then(() => { settledEarly = true })
+  await flushMicrotasks()
+  const resetRequest = port.sent.find(request => request.op === 'counters.reset')
+  assert.ok(resetRequest, 'resetStats must send counters.reset over the bridge')
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 6, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: resetRequest.request_id, op: 'counters.reset',
+    outcome: 'REJECTED', payload: { reason: 'ADMIN_CONFIRM_REQUIRED' },
+  })
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(settledEarly, false, 'the pending reset must not settle UNKNOWN/UNAVAILABLE on the ADMIN_CONFIRM_REQUIRED rejection')
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 7, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: resetRequest.request_id, op: 'counters.reset',
+    outcome: 'APPLIED', payload: { session_generation: 8 },
+  })
+  const outcome = await resetPending
+  assert.equal(outcome.outcome, 'APPLIED')
+  assert.equal(outcome.sessionGeneration, 8)
+  controller.dispose()
+  session.revoke('test end')
+})
+
+test('resetStats passes the device rejection reason through instead of the generic unavailable text', async () => {
+  const { controller } = makeController(op => {
+    if (op === 'snapshot.read') return { outcome: 'APPLIED', payload: bridgeSnapshot() }
+    if (op === 'counters.reset') return { outcome: 'REJECTED', payload: { reason: 'SOME_DEVICE_REASON' } }
+    return { outcome: 'UNAVAILABLE' }
+  })
+  await waitAuthored(controller)
+  const outcome = await controller.capabilities.resetStats({ sessionGeneration: 8 })
+  assert.equal(outcome.outcome, 'REJECTED')
+  assert.equal(outcome.reason, 'SOME_DEVICE_REASON')
 })
 
 test('openVideoStream validates scheme, session and expiry; release stops the media session', async () => {

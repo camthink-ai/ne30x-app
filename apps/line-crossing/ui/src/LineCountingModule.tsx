@@ -373,7 +373,11 @@ export default function LineCountingModule({ capabilities = unavailableCapabilit
             const outcome = await capabilities.resetStats({ sessionGeneration: currentSnapshot.sessionGeneration });
             if (!sameSessionState(stateRef.current, currentSnapshot.sessionGeneration)) return;
             if (outcome.outcome !== 'APPLIED' || outcome.sessionGeneration !== currentSnapshot.sessionGeneration) {
-                toast.error(outcome.outcome === 'UNKNOWN' ? i18n._('lineCrossing.unknownOutcome') : i18n._('lineCrossing.resetUnavailable'));
+                toast.error(
+                    outcome.reason === 'ADMIN_CONFIRM_REQUIRED'
+                        ? i18n._('lineCrossing.resetNeedsConfirm')
+                        : outcome.outcome === 'UNKNOWN' ? i18n._('lineCrossing.unknownOutcome') : i18n._('lineCrossing.resetUnavailable'),
+                );
                 return;
             }
             const fresh = await capabilities.readState();

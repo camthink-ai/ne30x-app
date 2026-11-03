@@ -708,7 +708,15 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
                 return { outcome: 'UNAVAILABLE', reason: 'App snapshot unavailable for counters reset' };
             }
             const result = await session.request('counters.reset', { session_generation: request.sessionGeneration });
-            if (result.outcome !== 'APPLIED') return { outcome: result.outcome === 'REJECTED' ? 'UNAVAILABLE' : result.outcome, reason: outcomeReason('counters.reset', result) };
+            if (result.outcome !== 'APPLIED') {
+                // Pass the device reason through verbatim (e.g.
+                // ADMIN_CONFIRM_REQUIRED) so the UI can explain the admin
+                // confirm flow instead of a generic "unavailable" toast.
+                return {
+                    outcome: result.outcome === 'REJECTED' ? 'REJECTED' : result.outcome,
+                    reason: result.reason ?? outcomeReason('counters.reset', result),
+                };
+            }
             const payload = isPlainObject(result.payload) ? result.payload : null;
             if (!payload || payload.session_generation !== request.sessionGeneration) {
                 return { outcome: 'UNKNOWN', reason: 'Bridge reset result failed the session cross-check' };
