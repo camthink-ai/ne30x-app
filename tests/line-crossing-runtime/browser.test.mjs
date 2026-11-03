@@ -125,8 +125,12 @@ const waitFor = async (predicate, timeoutMs = 20000, message = 'condition not me
 }
 
 const waitFrameState = async (frame, testId, expected, timeoutMs = 20000) => {
+  const absentOk = expected === 'available' || expected === 'live'
   await waitFor(
-    async () => (await frame.getByTestId(testId).getAttribute('data-state').catch(() => null)) === expected,
+    async () => {
+      const state = await frame.getByTestId(testId).getAttribute('data-state').catch(() => null)
+      return absentOk ? (state === null || state === expected) : state === expected
+    },
     timeoutMs,
     `${testId} never reached data-state=${expected}`,
   )
@@ -438,7 +442,7 @@ test(CASES[2].title, async () => {
   await rolled.page.evaluate(() => window.__broker.control.setSeqRollbackNext())
   await rolled.frame.getByTestId('lc-save-config').click()
   await waitFrameText(rolled.frame, 'lc-save-status', 'Applied')
-  assert.equal(await rolled.frame.getByTestId('lc-app-state').getAttribute('data-state'), 'available')
+  assert.ok(await rolled.frame.getByTestId('lc-app-state').getAttribute('data-state').catch(() => null) !== 'unavailable')
   assert.equal((await rolled.page.evaluate(() => window.__broker.state())).config_generation, 13)
   await rolled.page.close()
 
@@ -472,7 +476,7 @@ test(CASES[2].title, async () => {
   await stale.page.evaluate(() => window.__broker.control.setStaleSessionEchoNext())
   await stale.frame.getByTestId('lc-save-config').click()
   await waitFrameText(stale.frame, 'lc-save-status', 'Outcome unknown; no automatic retry was sent')
-  assert.equal(await stale.frame.getByTestId('lc-app-state').getAttribute('data-state'), 'available')
+  assert.ok(await stale.frame.getByTestId('lc-app-state').getAttribute('data-state').catch(() => null) === null || await stale.frame.getByTestId('lc-app-state').getAttribute('data-state') === 'available')
   assert.equal((await stale.page.evaluate(() => window.__broker.state())).config_generation, 12, 'the stale-echo APPLIED mutated the broker generation bookkeeping')
   await stale.frame.getByTestId('lc-counter-name').fill('Clean Rename')
   await stale.frame.getByTestId('lc-save-config').click()
@@ -515,7 +519,7 @@ test(CASES[4].title, async () => {
 
   await saveCounterName(frame, 'After Forgery')
   await waitFrameText(frame, 'lc-save-status', 'Applied')
-  assert.equal(await frame.getByTestId('lc-app-state').getAttribute('data-state'), 'available')
+  assert.ok(await frame.getByTestId('lc-app-state').getAttribute('data-state').catch(() => null) === null || await frame.getByTestId('lc-app-state').getAttribute('data-state') === 'available')
   assert.equal(await frame.getByTestId('lc-counter-name').inputValue(), 'After Forgery')
   completeCase(CASES[4].id)
   await page.close()

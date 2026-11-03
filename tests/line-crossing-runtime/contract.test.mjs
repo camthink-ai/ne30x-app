@@ -1172,15 +1172,16 @@ test('a fresh seed after a GAP resync or a re-grant keeps the accumulated live e
   await flushMicrotasks()
   assert.equal(controller.getState().events.state, 'available')
   assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [8, 7, 2, 1])
+  const eventsBefore = controller.getState().events.value.events.map(event => event.sequence)
   session.emit({
     kind: 'grant',
     grant: makeGrant({ seq: 3, ops: [...GRANT_OPS, 'live.subscribe'], expires_at_ms: Date.now() + 600000 }),
   })
-  assert.equal(await settleUntil(() => controller.getState().events.state === 'unavailable'), true)
-  assert.match(controller.getState().events.reason, /not been received/)
+  await flushMicrotasks()
+  assert.equal(controller.getState().events.state, 'available', 'a refreshed grant must not reset the live subscription')
   session.emit(frame(4, [20]))
   assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
-  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [20, 8, 7, 2, 1])
+  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [20, ...eventsBefore])
 })
 
 test('a missing live producer keeps events and tracks unavailable with the real reason', async () => {
@@ -1281,6 +1282,53 @@ test('the adapter announces refreshed grant expiry to the page for video re-armi
     assert.equal(controller.getState().grantExpiresAtMs, grant.expires_at_ms)
     listener({ kind: 'revoked', reason: 'probe' })
     assert.equal(controller.getState().grantExpiresAtMs, 0)
+
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('a refreshed grant while live is already active only extends the validity period', async () => {
+  let liveSubscribes = 0
+  let listener
+  const session = {
+    subscribe: (fn) => { listener = fn; return () => undefined },
+    getPhase: () => 'authorized',
+    getIdentity: () => makeIdentity(),
+    request: async (op) => {
+      if (op === 'live.subscribe') liveSubscribes += 1
+      return {
+        outcome: 'APPLIED',
+        payload: { schema: 'line-crossing/1', session_generation: 3, status: { state: 'running' }, config_generation: 1, state_revision: 1 },
+      }
+    },
+  }
+  const dispatched = []
+  const originalWindow = globalThis.window
+  globalThis.window = { dispatchEvent: (event) => dispatched.push(event) }
+  try {
+    const controller = runtime.createRuntimeController(session, { pollIntervalMs: 0 })
+    const first = makeGrant({
+      expires_at_ms: Date.now() + 300000,
+      ops: ['snapshot.read', 'live.subscribe'],
+    })
+    listener({ kind: 'grant', grant: first })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(liveSubscribes, 1)
+    const refreshed = makeGrant({
+      seq: 5,
+      expires_at_ms: Date.now() + 900000,
+      ops: ['snapshot.read', 'live.subscribe'],
+    })
+    console.error('[DBG] refreshed notification:', JSON.stringify({ kind: 'grant', grant: refreshed }))
+    listener({ kind: 'grant', grant: refreshed })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(liveSubscribes, 1, 'refresh must not re-run live.subscribe')
+    const announced = dispatched.filter((event) => event.type === 'lc_grant_refreshed')
+    assert.equal(announced.length, 2)
+    assert.equal(announced[1].detail.expiresAtMs, refreshed.expires_at_ms)
+    assert.equal(controller.getState().grantExpiresAtMs, refreshed.expires_at_ms)
   } finally {
     if (originalWindow === undefined) delete globalThis.window
     else globalThis.window = originalWindow

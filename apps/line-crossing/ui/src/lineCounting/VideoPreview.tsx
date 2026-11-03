@@ -302,9 +302,12 @@ export default function VideoPreview({
                         </>}
                     </svg>
                 )}
+                {state !== 'running' && (
                 <div className={`absolute left-2 top-2 z-10 rounded px-2.5 py-1 text-xs text-white backdrop-blur-sm ${state === 'running' ? 'bg-emerald-600/80' : state === 'stopped' ? 'bg-gray-600/80' : 'bg-gray-700/80'}`} data-testid="lc-runtime-badge">
                     {badgeText}
                 </div>
+                )}
+                {connectionState !== 'live' && (
                 <div
                     className={`absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded px-3 py-1 text-[11px] backdrop-blur-sm ${connectionState === 'live' ? 'bg-emerald-700/80 text-white' : connectionState === 'reconnecting' ? 'bg-black/70 text-amber-300' : 'bg-gray-700/90 text-gray-100'}`}
                     data-testid="lc-video-state"
@@ -312,6 +315,7 @@ export default function VideoPreview({
                 >
                     {connectionLabel}
                 </div>
+                )}
                 {connectionState !== 'live' && <Button
                     variant="outline"
                     size="sm"

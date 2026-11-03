@@ -54,7 +54,7 @@ $(BUILD)/core_%.o: $(APP_DIR)/src/%.c $(wildcard $(APP_DIR)/include/*.h) | $(BUI
 $(BUILD)/%.o: %.c $(wildcard *.h) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-V4_APP_VERSION ?= 4.2.10
+V4_APP_VERSION ?= 4.2.11
 V4_ELF := $(BUILD)/lc-line-crossing-v4.elf
 V4_APP_SRCS := lc_app_entry_v4.c lc_bus.c lc_bus_config.c lc_stateblob.c \
                lc_ctrl.c lc_cfgcodec.c lc_json.c lc_arena.c lc_libc_mini.c \
@@ -80,7 +80,7 @@ clean-v4:
 
 V5_UI_DIR ?= $(ROOT_DIR)/tests/line-crossing-ui/.build/production
 V5_OUT_DIR ?= $(BUILD)/pkg
-V5_UI_VERSION ?= 1.2.12
+V5_UI_VERSION ?= 1.2.13
 V5_HOST_CAPS ?= 0x3ff
 V5_EVENT_MAX ?= 1576
 V5_STATE_QUOTA ?= 512

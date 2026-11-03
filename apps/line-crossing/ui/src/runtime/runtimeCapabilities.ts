@@ -546,12 +546,14 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
 
     const onNotification = (notification: BridgeNotification) => {
         if (notification.kind === 'grant') {
+            const liveWasActive = livePhase === 'active';
             adoptGrant(notification.grant);
             if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
                 window.dispatchEvent(new CustomEvent('lc_grant_refreshed', {
                     detail: { expiresAtMs: notification.grant.expires_at_ms },
                 }));
             }
+            if (liveWasActive) return;
             void (async () => {
                 await activateLive();
                 await refresh();

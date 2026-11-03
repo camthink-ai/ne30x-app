@@ -491,9 +491,11 @@ export default function LineCountingModule({ capabilities = unavailableCapabilit
 
     return (
         <div className="flex flex-col gap-3 p-4" data-testid="lc-module">
+            {!(appFresh && appSnapshot?.status.state === 'running') && (
             <div role="status" data-testid="lc-app-state" data-state={appFresh ? 'available' : appCapability.state === 'available' ? 'stale' : appCapability.state} title={appCapability.state === 'unavailable' || appCapability.state === 'stale' ? appCapability.reason : undefined}>
                 {appStateText}
             </div>
+            )}
             <Card className="overflow-hidden">
                 <CardContent className="p-0">
                     <VideoPreview
