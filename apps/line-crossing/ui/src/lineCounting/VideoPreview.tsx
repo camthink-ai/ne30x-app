@@ -88,19 +88,29 @@ export default function VideoPreview({
             return undefined;
         }
         const grant = video.value;
-        if (grant.sessionGeneration < 1 || grant.expiresAtMs <= Date.now() || !videoRef.current) {
+        if (grant.sessionGeneration < 1 || !videoRef.current) {
             setConnectionState('unavailable');
             return undefined;
         }
         setConnectionState('reconnecting');
         let expired = false;
-        const expiryTimer = window.setTimeout(() => {
+        let expiryDeadlineMs = grant.expiresAtMs;
+        const onExpiry = () => {
             expired = true;
             setConnectionState('unavailable');
             playerRef.current?.destroy();
             playerRef.current = null;
             grant.release();
-        }, Math.max(0, grant.expiresAtMs - Date.now()));
+        };
+        let expiryTimer = window.setTimeout(onExpiry, Math.max(0, expiryDeadlineMs - Date.now()));
+        const onGrantRefreshed = (event: Event) => {
+            const refreshed = (event as CustomEvent<{ expiresAtMs: number }>).detail?.expiresAtMs;
+            if (typeof refreshed !== 'number' || refreshed <= expiryDeadlineMs || expired) return;
+            expiryDeadlineMs = refreshed;
+            window.clearTimeout(expiryTimer);
+            expiryTimer = window.setTimeout(onExpiry, Math.max(0, expiryDeadlineMs - Date.now()));
+        };
+        window.addEventListener('lc_grant_refreshed', onGrantRefreshed);
         const onWork = (event: Event) => {
             const connected = (event as CustomEvent<boolean>).detail;
             if (!connected) {
@@ -133,6 +143,7 @@ export default function VideoPreview({
             window.removeEventListener('wv_work', onWork);
             window.removeEventListener('wv_close', onClose);
             window.removeEventListener('wv_error', onError);
+            window.removeEventListener('lc_grant_refreshed', onGrantRefreshed);
             player.destroy();
             if (playerRef.current === player) playerRef.current = null;
             grant.release();
@@ -291,9 +302,12 @@ export default function VideoPreview({
                         </>}
                     </svg>
                 )}
+                {state !== 'running' && (
                 <div className={`absolute left-2 top-2 z-10 rounded px-2.5 py-1 text-xs text-white backdrop-blur-sm ${state === 'running' ? 'bg-emerald-600/80' : state === 'stopped' ? 'bg-gray-600/80' : 'bg-gray-700/80'}`} data-testid="lc-runtime-badge">
                     {badgeText}
                 </div>
+                )}
+                {connectionState !== 'live' && (
                 <div
                     className={`absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded px-3 py-1 text-[11px] backdrop-blur-sm ${connectionState === 'live' ? 'bg-emerald-700/80 text-white' : connectionState === 'reconnecting' ? 'bg-black/70 text-amber-300' : 'bg-gray-700/90 text-gray-100'}`}
                     data-testid="lc-video-state"
@@ -301,6 +315,7 @@ export default function VideoPreview({
                 >
                     {connectionLabel}
                 </div>
+                )}
                 {connectionState !== 'live' && <Button
                     variant="outline"
                     size="sm"

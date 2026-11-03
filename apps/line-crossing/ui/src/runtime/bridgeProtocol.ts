@@ -28,6 +28,16 @@ export const BRIDGE_OUTCOMES: readonly BridgeOutcome[] = ['APPLIED', 'CONFLICT',
 export const MAX_MESSAGE_BYTES = 16384;
 export const MAX_PENDING_REQUESTS = 4;
 export const REQUEST_DEADLINE_MS = 10000;
+/**
+ * Ops the host broker may hold open across an admin confirm banner
+ * (REJECTED / ADMIN_CONFIRM_REQUIRED is non-final for these). Their request
+ * deadline must outlast the host confirm TTL (120 s) so the pending entry is
+ * still alive when the broker's automatic re-send settles the request.
+ */
+export const CONFIRM_WAIT_OPS: readonly BridgeOp[] = ['counters.reset', 'enable.apply'];
+export const CONFIRM_REQUEST_DEADLINE_MS = 120000;
+
+export const isConfirmWaitOp = (op: BridgeOp): boolean => CONFIRM_WAIT_OPS.includes(op);
 
 export interface BridgeIdentity {
     publisher_id: string;

@@ -1,6 +1,8 @@
 import {
+    CONFIRM_REQUEST_DEADLINE_MS,
     MAX_PENDING_REQUESTS,
     REQUEST_DEADLINE_MS,
+    isConfirmWaitOp,
     validateEvent,
     validateGrant,
     validateHello,
@@ -187,10 +189,13 @@ export class BridgeSession {
                 this.clearTimeoutFn(timer);
                 resolve(outcome);
             };
+            // Confirm-wait ops stay pending across the host admin-confirm
+            // window, so their deadline must outlast the host confirm TTL.
+            const deadline = isConfirmWaitOp(op) ? Math.max(this.deadlineMs, CONFIRM_REQUEST_DEADLINE_MS) : this.deadlineMs;
             const timer = this.setTimeoutFn(() => {
                 if (this.pending.get(requestId)) this.pending.delete(requestId);
                 finish({ outcome: 'UNKNOWN', reason: 'Bridge request timed out before a RESULT arrived' });
-            }, this.deadlineMs);
+            }, deadline);
             this.pending.set(requestId, { op, resolve: finish });
             const expiredBeforeSend = this.nowFn() >= grant.expires_at_ms;
             if (expiredBeforeSend || this.phase !== 'authorized' || this.grant !== grant) {
@@ -332,12 +337,20 @@ export class BridgeSession {
             this.droppedInbound += 1;
             return;
         }
-        this.pending.delete(result.request_id);
         const payload = result.payload as { reason?: unknown } | undefined;
+        const reason = typeof payload?.reason === 'string' ? payload.reason : undefined;
+        if (result.outcome === 'REJECTED' && reason === 'ADMIN_CONFIRM_REQUIRED' && isConfirmWaitOp(result.op)) {
+            // Non-final for confirm-wait ops: the host broker keeps the request
+            // open behind the admin confirm banner and settles it with a
+            // follow-up RESULT on the same request id (automatic re-send or a
+            // synthetic timeout). Keep the pending entry alive.
+            return;
+        }
+        this.pending.delete(result.request_id);
         pending.resolve({
             outcome: result.outcome,
             payload: result.payload,
-            reason: typeof payload?.reason === 'string' ? payload.reason : undefined,
+            reason,
         });
     }
 

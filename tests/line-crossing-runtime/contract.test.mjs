@@ -140,6 +140,8 @@ test('frozen bridge v1 constants match the cross-repo wire freeze', () => {
   assert.equal(runtime.MAX_MESSAGE_BYTES, 16384)
   assert.equal(runtime.MAX_PENDING_REQUESTS, 4)
   assert.equal(runtime.REQUEST_DEADLINE_MS, 10000)
+  assert.equal(runtime.CONFIRM_REQUEST_DEADLINE_MS, 120000)
+  assert.deepEqual([...runtime.CONFIRM_WAIT_OPS], ['counters.reset', 'enable.apply'])
 })
 
 test('identity validation is strict about schema, digests and generation counters', () => {
@@ -331,6 +333,62 @@ test('mismatched request ids and ops are ignored and keep the original pending u
   })
   const outcome = await pending
   assert.equal(outcome.outcome, 'UNKNOWN')
+})
+
+test('confirm-wait ops extend the request deadline past the host confirm TTL', async () => {
+  const timeouts = []
+  const { session, port } = authorized({ ops: ['counters.reset', 'snapshot.read'] }, {
+    setTimeoutFn: (_handler, timeout) => {
+      timeouts.push(timeout)
+      return timeouts.length
+    },
+    clearTimeoutFn: () => {},
+  })
+  session.request('snapshot.read')
+  await flushMicrotasks()
+  session.request('counters.reset', { session_generation: 8 })
+  await flushMicrotasks()
+  assert.equal(port.sent.length, 2)
+  assert.deepEqual(timeouts, [runtime.REQUEST_DEADLINE_MS, runtime.CONFIRM_REQUEST_DEADLINE_MS])
+})
+
+test('a REJECTED ADMIN_CONFIRM_REQUIRED on counters.reset keeps the request pending for the follow-up RESULT', async () => {
+  const { session, port } = authorized({ ops: ['counters.reset'] })
+  const reset = session.request('counters.reset', { session_generation: 8 })
+  await flushMicrotasks()
+  const requestId = port.sent[0].request_id
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 3, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestId, op: 'counters.reset',
+    outcome: 'REJECTED', payload: { reason: 'ADMIN_CONFIRM_REQUIRED' },
+  })
+  await flushMicrotasks()
+  let settled = false
+  reset.then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(settled, false, 'the confirm-wait request must stay pending across the admin confirm window')
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 4, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestId, op: 'counters.reset',
+    outcome: 'APPLIED', payload: { session_generation: 8 },
+  })
+  const outcome = await reset
+  assert.equal(outcome.outcome, 'APPLIED')
+  assert.deepEqual(outcome.payload, { session_generation: 8 })
+})
+
+test('ADMIN_CONFIRM_REQUIRED stays final for ops outside the confirm-wait set', async () => {
+  const { session, port } = authorized({ ops: ['snapshot.read'] })
+  const read = session.request('snapshot.read')
+  await flushMicrotasks()
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 3, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: port.sent[0].request_id, op: 'snapshot.read',
+    outcome: 'REJECTED', payload: { reason: 'ADMIN_CONFIRM_REQUIRED' },
+  })
+  const outcome = await read
+  assert.equal(outcome.outcome, 'REJECTED')
+  assert.equal(outcome.reason, 'ADMIN_CONFIRM_REQUIRED')
 })
 
 test('replayed sequence numbers are dropped while fresh traffic continues', async () => {
@@ -934,6 +992,70 @@ test('resetStats re-reads the authoritative snapshot after an APPLIED reset', as
   assert.equal(controller.getState().stats.value.total.in, 0)
 })
 
+test('resetStats stays pending through an ADMIN_CONFIRM_REQUIRED rejection until the follow-up RESULT settles it', async () => {
+  const session = new runtime.BridgeSession()
+  const port = new FakePort()
+  assert.equal(session.acceptHello(makeHello(), port), true)
+  const controller = runtime.createRuntimeController(session, { pollIntervalMs: 0 })
+  port.emit(makeGrant({ seq: 2, ops: GRANT_OPS, expires_at_ms: Date.now() + 600000 }))
+  await flushMicrotasks()
+  const refreshRequests = port.sent.filter(request => ['snapshot.read', 'report-policy.read', 'enable.read'].includes(request.op))
+  assert.equal(refreshRequests.length, 3)
+  const requestIdOf = op => refreshRequests.find(request => request.op === op).request_id
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 3, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestIdOf('snapshot.read'), op: 'snapshot.read',
+    outcome: 'APPLIED', payload: bridgeSnapshot(),
+  })
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 4, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestIdOf('report-policy.read'), op: 'report-policy.read',
+    outcome: 'UNAVAILABLE', payload: { reason: 'not implemented' },
+  })
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 5, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: requestIdOf('enable.read'), op: 'enable.read',
+    outcome: 'UNAVAILABLE', payload: { reason: 'not implemented' },
+  })
+  assert.equal(await waitAuthored(controller), true)
+
+  let settledEarly = false
+  const resetPending = controller.capabilities.resetStats({ sessionGeneration: 8 })
+  resetPending.then(() => { settledEarly = true })
+  await flushMicrotasks()
+  const resetRequest = port.sent.find(request => request.op === 'counters.reset')
+  assert.ok(resetRequest, 'resetStats must send counters.reset over the bridge')
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 6, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: resetRequest.request_id, op: 'counters.reset',
+    outcome: 'REJECTED', payload: { reason: 'ADMIN_CONFIRM_REQUIRED' },
+  })
+  await new Promise(resolve => setTimeout(resolve, 40))
+  assert.equal(settledEarly, false, 'the pending reset must not settle UNKNOWN/UNAVAILABLE on the ADMIN_CONFIRM_REQUIRED rejection')
+  port.emit({
+    protocol: 'ne301.sidecar.bridge.v1', type: 'RESULT', seq: 7, grant_id: 'G'.repeat(24),
+    identity: makeIdentity(), request_id: resetRequest.request_id, op: 'counters.reset',
+    outcome: 'APPLIED', payload: { session_generation: 8 },
+  })
+  const outcome = await resetPending
+  assert.equal(outcome.outcome, 'APPLIED')
+  assert.equal(outcome.sessionGeneration, 8)
+  controller.dispose()
+  session.revoke('test end')
+})
+
+test('resetStats passes the device rejection reason through instead of the generic unavailable text', async () => {
+  const { controller } = makeController(op => {
+    if (op === 'snapshot.read') return { outcome: 'APPLIED', payload: bridgeSnapshot() }
+    if (op === 'counters.reset') return { outcome: 'REJECTED', payload: { reason: 'SOME_DEVICE_REASON' } }
+    return { outcome: 'UNAVAILABLE' }
+  })
+  await waitAuthored(controller)
+  const outcome = await controller.capabilities.resetStats({ sessionGeneration: 8 })
+  assert.equal(outcome.outcome, 'REJECTED')
+  assert.equal(outcome.reason, 'SOME_DEVICE_REASON')
+})
+
 test('openVideoStream validates scheme, session and expiry; release stops the media session', async () => {
   const videoPayload = overrides => ({
     outcome: 'APPLIED',
@@ -1172,15 +1294,16 @@ test('a fresh seed after a GAP resync or a re-grant keeps the accumulated live e
   await flushMicrotasks()
   assert.equal(controller.getState().events.state, 'available')
   assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [8, 7, 2, 1])
+  const eventsBefore = controller.getState().events.value.events.map(event => event.sequence)
   session.emit({
     kind: 'grant',
     grant: makeGrant({ seq: 3, ops: [...GRANT_OPS, 'live.subscribe'], expires_at_ms: Date.now() + 600000 }),
   })
-  assert.equal(await settleUntil(() => controller.getState().events.state === 'unavailable'), true)
-  assert.match(controller.getState().events.reason, /not been received/)
+  await flushMicrotasks()
+  assert.equal(controller.getState().events.state, 'available', 'a refreshed grant must not reset the live subscription')
   session.emit(frame(4, [20]))
   assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
-  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [20, 8, 7, 2, 1])
+  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [20, ...eventsBefore])
 })
 
 test('a missing live producer keeps events and tracks unavailable with the real reason', async () => {
@@ -1258,4 +1381,100 @@ test('production entry owns the runtime adapter and test fixtures stay isolated'
   }
   const testMain = readFileSync(path.join(repoRoot, 'tests/line-crossing-ui/src/test-main.tsx'), 'utf8')
   assert.match(testMain, /createTestCapabilities/)
+})
+
+test('the adapter announces refreshed grant expiry to the page for video re-arming', () => {
+  const dispatched = []
+  const originalWindow = globalThis.window
+  globalThis.window = { dispatchEvent: (event) => dispatched.push(event) }
+  try {
+    let listener
+    const session = {
+      subscribe: (fn) => { listener = fn; return () => undefined },
+      getPhase: () => 'authorized',
+      request: async () => ({ outcome: 'UNAVAILABLE', reason: 'stub transport' }),
+    }
+    const controller = runtime.createRuntimeController(session, { pollIntervalMs: 0 })
+    assert.ok(typeof listener === 'function')
+    const grant = makeGrant({ expires_at_ms: Date.now() + 900000 })
+    listener({ kind: 'grant', grant })
+    const announced = dispatched.filter((event) => event.type === 'lc_grant_refreshed')
+    assert.equal(announced.length, 1)
+    assert.equal(announced[0].detail.expiresAtMs, grant.expires_at_ms)
+    assert.equal(controller.getState().grantExpiresAtMs, grant.expires_at_ms)
+    listener({ kind: 'revoked', reason: 'probe' })
+    assert.equal(controller.getState().grantExpiresAtMs, 0)
+
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('a refreshed grant while live is already active only extends the validity period', async () => {
+  let liveSubscribes = 0
+  let listener
+  const session = {
+    subscribe: (fn) => { listener = fn; return () => undefined },
+    getPhase: () => 'authorized',
+    getIdentity: () => makeIdentity(),
+    request: async (op) => {
+      if (op === 'live.subscribe') liveSubscribes += 1
+      return {
+        outcome: 'APPLIED',
+        payload: { schema: 'line-crossing/1', session_generation: 3, status: { state: 'running' }, config_generation: 1, state_revision: 1 },
+      }
+    },
+  }
+  const dispatched = []
+  const originalWindow = globalThis.window
+  globalThis.window = { dispatchEvent: (event) => dispatched.push(event) }
+  try {
+    const controller = runtime.createRuntimeController(session, { pollIntervalMs: 0 })
+    const first = makeGrant({
+      expires_at_ms: Date.now() + 300000,
+      ops: ['snapshot.read', 'live.subscribe'],
+    })
+    listener({ kind: 'grant', grant: first })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(liveSubscribes, 1)
+    const refreshed = makeGrant({
+      seq: 5,
+      expires_at_ms: Date.now() + 900000,
+      ops: ['snapshot.read', 'live.subscribe'],
+    })
+    console.error('[DBG] refreshed notification:', JSON.stringify({ kind: 'grant', grant: refreshed }))
+    listener({ kind: 'grant', grant: refreshed })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(liveSubscribes, 1, 'refresh must not re-run live.subscribe')
+    const announced = dispatched.filter((event) => event.type === 'lc_grant_refreshed')
+    assert.equal(announced.length, 2)
+    assert.equal(announced[1].detail.expiresAtMs, refreshed.expires_at_ms)
+    assert.equal(controller.getState().grantExpiresAtMs, refreshed.expires_at_ms)
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})
+
+test('a dangerous.confirm EVENT never perturbs an active live projection', async () => {
+  const { session, controller } = makeController(op => (op === 'live.subscribe' ? { outcome: 'APPLIED', payload: {} } : { outcome: 'UNAVAILABLE' }), {
+    ops: [...GRANT_OPS, 'live.subscribe'],
+  })
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'unavailable'), true)
+  session.emit({ kind: 'event', event: { payload: { stream: 'live', stream_seq: 1, data: { server_now_ms: Date.now(), events: [{ sequence: 1, timestamp_ms: Date.now() - 1000, track_id: 1, direction: 'in', target_class: 'person' }] } } } })
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
+  const before = controller.getState().events.value.events.map(event => event.sequence)
+
+  session.emit({
+    kind: 'event',
+    event: { payload: { stream: 'dangerous.confirm', stream_seq: 2, data: { op: 'counters.reset' } } },
+  })
+  assert.equal(controller.getState().events.state, 'available', 'non-live broker notification must not fail the live projection')
+  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), before)
+
+  session.emit({ kind: 'event', event: { payload: { stream: 'live', stream_seq: 3, data: { server_now_ms: Date.now(), events: [{ sequence: 2, timestamp_ms: Date.now() - 500, track_id: 2, direction: 'out', target_class: 'person' }] } } } })
+  assert.equal(await settleUntil(() => controller.getState().events.state === 'available'), true)
+  assert.deepEqual(controller.getState().events.value.events.map(event => event.sequence), [2, 1], 'live events continue processing after a confirm notification')
 })

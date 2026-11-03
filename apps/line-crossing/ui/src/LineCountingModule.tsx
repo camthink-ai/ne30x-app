@@ -373,7 +373,11 @@ export default function LineCountingModule({ capabilities = unavailableCapabilit
             const outcome = await capabilities.resetStats({ sessionGeneration: currentSnapshot.sessionGeneration });
             if (!sameSessionState(stateRef.current, currentSnapshot.sessionGeneration)) return;
             if (outcome.outcome !== 'APPLIED' || outcome.sessionGeneration !== currentSnapshot.sessionGeneration) {
-                toast.error(outcome.outcome === 'UNKNOWN' ? i18n._('lineCrossing.unknownOutcome') : i18n._('lineCrossing.resetUnavailable'));
+                toast.error(
+                    outcome.reason === 'ADMIN_CONFIRM_REQUIRED'
+                        ? i18n._('lineCrossing.resetNeedsConfirm')
+                        : outcome.outcome === 'UNKNOWN' ? i18n._('lineCrossing.unknownOutcome') : i18n._('lineCrossing.resetUnavailable'),
+                );
                 return;
             }
             const fresh = await capabilities.readState();
@@ -483,7 +487,7 @@ export default function LineCountingModule({ capabilities = unavailableCapabilit
     const videoCapability: Capability<VideoStreamGrant> = currentVideo.state === 'available'
         ? !appSnapshot || currentVideo.value.sessionGeneration !== appSnapshot.sessionGeneration
             ? { state: 'unavailable', reason: 'Video grant belongs to a different App session' }
-            : currentVideo.value.expiresAtMs <= now
+            : Math.max(currentVideo.value.expiresAtMs, state?.grantExpiresAtMs ?? 0) <= now
                 ? { state: 'unavailable', reason: 'Video grant has expired' }
                 : currentVideo
         : currentVideo;
@@ -491,9 +495,11 @@ export default function LineCountingModule({ capabilities = unavailableCapabilit
 
     return (
         <div className="flex flex-col gap-3 p-4" data-testid="lc-module">
+            {!(appFresh && appSnapshot?.status.state === 'running') && (
             <div role="status" data-testid="lc-app-state" data-state={appFresh ? 'available' : appCapability.state === 'available' ? 'stale' : appCapability.state} title={appCapability.state === 'unavailable' || appCapability.state === 'stale' ? appCapability.reason : undefined}>
                 {appStateText}
             </div>
+            )}
             <Card className="overflow-hidden">
                 <CardContent className="p-0">
                     <VideoPreview
