@@ -483,7 +483,7 @@ export default function LineCountingModule({ capabilities = unavailableCapabilit
     const videoCapability: Capability<VideoStreamGrant> = currentVideo.state === 'available'
         ? !appSnapshot || currentVideo.value.sessionGeneration !== appSnapshot.sessionGeneration
             ? { state: 'unavailable', reason: 'Video grant belongs to a different App session' }
-            : currentVideo.value.expiresAtMs <= now
+            : Math.max(currentVideo.value.expiresAtMs, state?.grantExpiresAtMs ?? 0) <= now
                 ? { state: 'unavailable', reason: 'Video grant has expired' }
                 : currentVideo
         : currentVideo;

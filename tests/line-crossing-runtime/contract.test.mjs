@@ -1259,3 +1259,30 @@ test('production entry owns the runtime adapter and test fixtures stay isolated'
   const testMain = readFileSync(path.join(repoRoot, 'tests/line-crossing-ui/src/test-main.tsx'), 'utf8')
   assert.match(testMain, /createTestCapabilities/)
 })
+
+test('the adapter announces refreshed grant expiry to the page for video re-arming', () => {
+  const dispatched = []
+  const originalWindow = globalThis.window
+  globalThis.window = { dispatchEvent: (event) => dispatched.push(event) }
+  try {
+    let listener
+    const session = {
+      subscribe: (fn) => { listener = fn; return () => undefined },
+      getPhase: () => 'authorized',
+      request: async () => ({ outcome: 'UNAVAILABLE', reason: 'stub transport' }),
+    }
+    const controller = runtime.createRuntimeController(session, { pollIntervalMs: 0 })
+    assert.ok(typeof listener === 'function')
+    const grant = makeGrant({ expires_at_ms: Date.now() + 900000 })
+    listener({ kind: 'grant', grant })
+    const announced = dispatched.filter((event) => event.type === 'lc_grant_refreshed')
+    assert.equal(announced.length, 1)
+    assert.equal(announced[0].detail.expiresAtMs, grant.expires_at_ms)
+    assert.equal(controller.getState().grantExpiresAtMs, grant.expires_at_ms)
+    listener({ kind: 'revoked', reason: 'probe' })
+    assert.equal(controller.getState().grantExpiresAtMs, 0)
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})

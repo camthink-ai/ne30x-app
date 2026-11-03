@@ -129,6 +129,7 @@ export interface VideoStreamGrant {
 
 export interface LineCrossingUiState {
     revision: number;
+    grantExpiresAtMs: number;
     app: Capability<AppSnapshot>;
     configWrite: Capability<boolean>;
     businessEnable: Capability<boolean>;

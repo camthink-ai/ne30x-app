@@ -340,6 +340,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
     const listeners = new Set<(state: LineCrossingUiState) => void>();
     let ui: LineCrossingUiState = {
         revision: 1,
+        grantExpiresAtMs: 0,
         app: unavailable('Bridge session is not authorized'),
         configWrite: unavailable('Bridge session is not authorized'),
         businessEnable: unavailable('Bridge session is not authorized'),
@@ -546,6 +547,11 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
     const onNotification = (notification: BridgeNotification) => {
         if (notification.kind === 'grant') {
             adoptGrant(notification.grant);
+            if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+                window.dispatchEvent(new CustomEvent('lc_grant_refreshed', {
+                    detail: { expiresAtMs: notification.grant.expires_at_ms },
+                }));
+            }
             void (async () => {
                 await activateLive();
                 await refresh();
@@ -559,6 +565,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
         if (notification.kind === 'hello') return;
         ops.clear();
         grantExpiresAtMs = 0;
+        emitPatch({ grantExpiresAtMs: 0 });
         livePhase = 'idle';
         lastStreamSeq = -1;
         liveReason = notification.reason;
@@ -568,6 +575,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
     const adoptGrant = (grant: BridgeGrant) => {
         ops = new Set(grant.ops);
         grantExpiresAtMs = grant.expires_at_ms;
+        emitPatch({ grantExpiresAtMs: grant.expires_at_ms });
         const identityCheck = validateIdentity(grant.identity);
         if (identityCheck.ok && identityCheck.value.app_id !== BRIDGE_APP_ID) {
             session.revoke('GRANT app_id does not match this signed App');
