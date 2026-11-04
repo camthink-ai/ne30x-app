@@ -81,7 +81,6 @@ jobs:
             --repo-version "$RELEASE_VERSION" \
             --provenance "$PACKAGE.provenance.json" \
             --verification "${PACKAGE%.neapp}.verification.json" \
-            --known-limitations package/release/known-limitations.md \
             --commits-file "$RUNNER_TEMP/commits.txt" \
             --out "$RUNNER_TEMP/release-notes.md"
           cat "$RUNNER_TEMP/release-notes.md"

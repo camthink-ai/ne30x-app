@@ -51,7 +51,7 @@ def summarize_commits(subjects: list[str], max_commits: int = DEFAULT_MAX_COMMIT
 
 
 def render_notes(repo_version: str, provenance: dict, verification: dict,
-                 commits: dict[str, list[str]], known_limitations: list[str]) -> str:
+                 commits: dict[str, list[str]]) -> str:
     parse_version(repo_version)
     if verification.get("result") != "PASS":
         raise ReleaseToolError(
@@ -104,40 +104,7 @@ def render_notes(repo_version: str, provenance: dict, verification: dict,
     else:
         lines.append("No recorded commit history for this range.")
         lines.append("")
-
-    lines.extend([
-        "### Verification",
-        "",
-        f"- Independent verifier result: **{verification['result']}**",
-        "- Verification report: attached as `*.verification.json`",
-        "- Build provenance: attached as `*.provenance.json`",
-        "",
-        "### Known limitations",
-        "",
-    ])
-    if known_limitations:
-        lines.extend(f"- {item}" for item in known_limitations)
-    else:
-        lines.append("- None recorded.")
-    lines.append("")
     return "\n".join(lines)
-
-
-def load_known_limitations(path: Path | None) -> list[str]:
-    if path is None or not path.is_file():
-        return []
-    items: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or line.startswith(">"):
-            continue
-        if line.startswith("- "):
-            items.append(line[2:].strip())
-        elif items:
-            items[-1] = f"{items[-1]} {line}"
-        else:
-            items.append(line)
-    return items
 
 
 def gh(args: list[str]) -> tuple[int, str]:
@@ -224,7 +191,6 @@ def main(argv: list[str] | None = None) -> int:
     notes.add_argument("--provenance", required=True, type=Path)
     notes.add_argument("--verification", required=True, type=Path)
     notes.add_argument("--out", required=True, type=Path)
-    notes.add_argument("--known-limitations", type=Path)
     notes.add_argument("--commits-file", type=Path,
                        help="one git subject per line; defaults to no history")
 
@@ -254,8 +220,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.commits_file.read_text(encoding="utf-8")
                             .splitlines() if line.strip()]
             text = render_notes(args.repo_version, provenance, verification,
-                                summarize_commits(subjects),
-                                load_known_limitations(args.known_limitations))
+                                summarize_commits(subjects))
             args.out.write_text(text, encoding="utf-8")
             print(f"notes written: {args.out}")
         elif args.command == "check-conflicts":
