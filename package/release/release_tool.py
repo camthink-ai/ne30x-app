@@ -51,7 +51,7 @@ def summarize_commits(subjects: list[str], max_commits: int = DEFAULT_MAX_COMMIT
 
 
 def render_notes(repo_version: str, provenance: dict, verification: dict,
-                 commits: dict[str, list[str]], known_limitations: list[str]) -> str:
+                 commits: dict[str, list[str]]) -> str:
     parse_version(repo_version)
     if verification.get("result") != "PASS":
         raise ReleaseToolError(
@@ -104,55 +104,7 @@ def render_notes(repo_version: str, provenance: dict, verification: dict,
     else:
         lines.append("No recorded commit history for this range.")
         lines.append("")
-
-    host_policy = provenance.get("host_policy", {})
-    host_caps = host_policy.get("host_caps", "unrecorded")
-    if isinstance(host_caps, int):
-        host_caps = f"0x{host_caps:x}"
-    lines.extend([
-        "### Compatibility",
-        "",
-        f"- Host caps: `{host_caps}`",
-        f"- Resource quotas: event_max={host_policy.get('event_max', 'unrecorded')},"
-        f" state_quota={host_policy.get('state_quota', 'unrecorded')},"
-        f" control_max={host_policy.get('control_max', 'unrecorded')},"
-        f" snapshot_max={host_policy.get('snapshot_max', 'unrecorded')},"
-        f" report_max={host_policy.get('report_max', 'unrecorded')}",
-        f"- Verification boundary: `{provenance.get('verification_boundary', 'unrecorded')}`",
-        "- Requires device firmware with unsigned NEAPP05 admission enabled.",
-        "",
-        "### Verification",
-        "",
-        f"- Independent verifier result: **{verification['result']}**",
-        "- Verification report: attached as `*.verification.json`",
-        "- Build provenance: attached as `*.provenance.json`",
-        "",
-        "### Known limitations",
-        "",
-    ])
-    if known_limitations:
-        lines.extend(f"- {item}" for item in known_limitations)
-    else:
-        lines.append("- None recorded.")
-    lines.append("")
     return "\n".join(lines)
-
-
-def load_known_limitations(path: Path | None) -> list[str]:
-    if path is None or not path.is_file():
-        return []
-    items: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or line.startswith(">"):
-            continue
-        if line.startswith("- "):
-            items.append(line[2:].strip())
-        elif items:
-            items[-1] = f"{items[-1]} {line}"
-        else:
-            items.append(line)
-    return items
 
 
 def gh(args: list[str]) -> tuple[int, str]:
@@ -239,7 +191,6 @@ def main(argv: list[str] | None = None) -> int:
     notes.add_argument("--provenance", required=True, type=Path)
     notes.add_argument("--verification", required=True, type=Path)
     notes.add_argument("--out", required=True, type=Path)
-    notes.add_argument("--known-limitations", type=Path)
     notes.add_argument("--commits-file", type=Path,
                        help="one git subject per line; defaults to no history")
 
@@ -269,8 +220,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.commits_file.read_text(encoding="utf-8")
                             .splitlines() if line.strip()]
             text = render_notes(args.repo_version, provenance, verification,
-                                summarize_commits(subjects),
-                                load_known_limitations(args.known_limitations))
+                                summarize_commits(subjects))
             args.out.write_text(text, encoding="utf-8")
             print(f"notes written: {args.out}")
         elif args.command == "check-conflicts":

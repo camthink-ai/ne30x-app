@@ -72,9 +72,9 @@ class CommitClassificationTest(unittest.TestCase):
 
 class RenderNotesTest(unittest.TestCase):
     def render(self, provenance=PROVENANCE, verification=VERIFICATION,
-               commits=None, limitations=None):
+               commits=None):
         return release_tool.render_notes("v1.0.0", provenance, verification,
-                                         commits or {}, limitations or [])
+                                         commits or {})
 
     def test_notes_carry_package_identity_and_versions_separately(self):
         text = self.render()
@@ -84,7 +84,6 @@ class RenderNotesTest(unittest.TestCase):
         self.assertIn("b" * 64, text)
         self.assertIn("a" * 40, text)
         self.assertIn("recorded", text)
-        self.assertIn("**PASS**", text)
 
     def test_notes_reject_failed_verification(self):
         with self.assertRaises(release_tool.ReleaseToolError):
@@ -96,33 +95,16 @@ class RenderNotesTest(unittest.TestCase):
         with self.assertRaises(release_tool.ReleaseToolError):
             self.render(provenance=broken)
 
-    def test_notes_render_commits_and_limitations(self):
+    def test_notes_render_commits(self):
         commits = {"Added": ["feat: add x"], "Fixed": ["fix: y"]}
-        text = self.render(commits=commits, limitations=["item one"])
+        text = self.render(commits=commits)
         self.assertIn("#### Added", text)
         self.assertIn("- feat: add x", text)
         self.assertIn("#### Fixed", text)
-        self.assertIn("- item one", text)
+        self.assertIn("- fix: y", text)
 
     def test_notes_without_history_states_it(self):
         self.assertIn("No recorded commit history for this range.", self.render())
-
-    def test_limitations_fallback(self):
-        self.assertIn("- None recorded.", self.render())
-
-
-class KnownLimitationsTest(unittest.TestCase):
-    def test_parses_bullets_and_skips_headings(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "limits.md"
-            path.write_text("# Known limitations\n\n- first\n- second\n",
-                            encoding="utf-8")
-            self.assertEqual(release_tool.load_known_limitations(path),
-                             ["first", "second"])
-
-    def test_missing_file_means_empty(self):
-        self.assertEqual(
-            release_tool.load_known_limitations(Path("/nonexistent/x.md")), [])
 
 
 class CheckConflictsTest(unittest.TestCase):
