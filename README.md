@@ -25,7 +25,7 @@ An AI-powered line-crossing application featuring:
 
 ```text
 apps/       Application source code and Web UI
-package/    NEAPP05 packaging, verification, and release utilities
+package/    NEAPP packaging, verification, and release utilities
 tests/      Current application, runtime, and package tests
 .github/    CI workflows
 ```
@@ -118,9 +118,9 @@ UI tests require prepared dependencies and browser-testing tools. Automated test
 
 ## Packaging and Releases
 
-Applications use the **NEAPP05** format, combining native code and Web UI into one `.neapp` file.
+Applications use the **NEAPP** package format, combining native code and Web UI into one `.neapp` file. The current container format is **v5**.
 
-NEAPP05 packages are unsigned. Checksums verify file integrity, while installation permissions are enforced by the device.
+Current NEAPP container v5 packages are unsigned. Checksums verify file integrity, while installation permissions are enforced by the device.
 
 The standard delivery workflow is:
 

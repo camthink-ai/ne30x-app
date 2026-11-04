@@ -129,6 +129,7 @@ export interface VideoStreamGrant {
 
 export interface LineCrossingUiState {
     revision: number;
+    grantExpiresAtMs: number;
     app: Capability<AppSnapshot>;
     configWrite: Capability<boolean>;
     businessEnable: Capability<boolean>;
@@ -156,7 +157,7 @@ export type EnableApplyOutcome =
 
 export type ResetOutcome =
     | { outcome: 'APPLIED'; sessionGeneration: number }
-    | { outcome: 'CONFLICT' | 'UNKNOWN' | 'UNAVAILABLE'; reason?: string };
+    | { outcome: 'CONFLICT' | 'UNKNOWN' | 'REJECTED' | 'UNAVAILABLE'; reason?: string };
 
 export interface LineCrossingCapabilities {
     readState: () => Promise<LineCrossingUiState>;

@@ -340,6 +340,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
     const listeners = new Set<(state: LineCrossingUiState) => void>();
     let ui: LineCrossingUiState = {
         revision: 1,
+        grantExpiresAtMs: 0,
         app: unavailable('Bridge session is not authorized'),
         configWrite: unavailable('Bridge session is not authorized'),
         businessEnable: unavailable('Bridge session is not authorized'),
@@ -401,6 +402,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
 
     const onLiveEvent = (event: BridgeEvent) => {
         if (livePhase !== 'active') return;
+        if (event.payload.stream !== 'live') return;
         if (event.payload.status === 'REVOKE') {
             livePhase = 'failed';
             liveReason = 'Host revoked the live stream';
@@ -545,7 +547,14 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
 
     const onNotification = (notification: BridgeNotification) => {
         if (notification.kind === 'grant') {
+            const liveWasActive = livePhase === 'active';
             adoptGrant(notification.grant);
+            if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+                window.dispatchEvent(new CustomEvent('lc_grant_refreshed', {
+                    detail: { expiresAtMs: notification.grant.expires_at_ms },
+                }));
+            }
+            if (liveWasActive) return;
             void (async () => {
                 await activateLive();
                 await refresh();
@@ -559,6 +568,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
         if (notification.kind === 'hello') return;
         ops.clear();
         grantExpiresAtMs = 0;
+        emitPatch({ grantExpiresAtMs: 0 });
         livePhase = 'idle';
         lastStreamSeq = -1;
         liveReason = notification.reason;
@@ -568,6 +578,7 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
     const adoptGrant = (grant: BridgeGrant) => {
         ops = new Set(grant.ops);
         grantExpiresAtMs = grant.expires_at_ms;
+        emitPatch({ grantExpiresAtMs: grant.expires_at_ms });
         const identityCheck = validateIdentity(grant.identity);
         if (identityCheck.ok && identityCheck.value.app_id !== BRIDGE_APP_ID) {
             session.revoke('GRANT app_id does not match this signed App');
@@ -698,7 +709,15 @@ export function createRuntimeController(session: BridgeSession, options: Runtime
                 return { outcome: 'UNAVAILABLE', reason: 'App snapshot unavailable for counters reset' };
             }
             const result = await session.request('counters.reset', { session_generation: request.sessionGeneration });
-            if (result.outcome !== 'APPLIED') return { outcome: result.outcome === 'REJECTED' ? 'UNAVAILABLE' : result.outcome, reason: outcomeReason('counters.reset', result) };
+            if (result.outcome !== 'APPLIED') {
+                // Pass the device reason through verbatim (e.g.
+                // ADMIN_CONFIRM_REQUIRED) so the UI can explain the admin
+                // confirm flow instead of a generic "unavailable" toast.
+                return {
+                    outcome: result.outcome === 'REJECTED' ? 'REJECTED' : result.outcome,
+                    reason: result.reason ?? outcomeReason('counters.reset', result),
+                };
+            }
             const payload = isPlainObject(result.payload) ? result.payload : null;
             if (!payload || payload.session_generation !== request.sessionGeneration) {
                 return { outcome: 'UNKNOWN', reason: 'Bridge reset result failed the session cross-check' };
