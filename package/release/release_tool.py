@@ -105,22 +105,7 @@ def render_notes(repo_version: str, provenance: dict, verification: dict,
         lines.append("No recorded commit history for this range.")
         lines.append("")
 
-    host_policy = provenance.get("host_policy", {})
-    host_caps = host_policy.get("host_caps", "unrecorded")
-    if isinstance(host_caps, int):
-        host_caps = f"0x{host_caps:x}"
     lines.extend([
-        "### Compatibility",
-        "",
-        f"- Host caps: `{host_caps}`",
-        f"- Resource quotas: event_max={host_policy.get('event_max', 'unrecorded')},"
-        f" state_quota={host_policy.get('state_quota', 'unrecorded')},"
-        f" control_max={host_policy.get('control_max', 'unrecorded')},"
-        f" snapshot_max={host_policy.get('snapshot_max', 'unrecorded')},"
-        f" report_max={host_policy.get('report_max', 'unrecorded')}",
-        f"- Verification boundary: `{provenance.get('verification_boundary', 'unrecorded')}`",
-        "- Requires device firmware with unsigned NEAPP05 admission enabled.",
-        "",
         "### Verification",
         "",
         f"- Independent verifier result: **{verification['result']}**",
