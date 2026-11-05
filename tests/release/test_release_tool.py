@@ -15,6 +15,7 @@ PROVENANCE = {
     "app_id": "line-crossing",
     "native_version": [4, 2, 8],
     "ui_version": [1, 2, 10],
+    "product_version": "1.0.2",
     "source_commit": "a" * 40,
     "signing_dependencies": "none: no private key, no SPKI, no signature",
     "package": {"sha256": "b" * 64, "len": 123456},
@@ -72,18 +73,59 @@ class CommitClassificationTest(unittest.TestCase):
 
 class RenderNotesTest(unittest.TestCase):
     def render(self, provenance=PROVENANCE, verification=VERIFICATION,
-               commits=None):
-        return release_tool.render_notes("v1.0.0", provenance, verification,
-                                         commits or {})
+               commits=None, limitations=None, repo_version="v1.0.2"):
+        return release_tool.render_notes(repo_version, provenance, verification,
+                                         commits or {}, limitations or [])
 
-    def test_notes_carry_package_identity_and_versions_separately(self):
+    def test_notes_show_product_version_as_the_only_version_line(self):
         text = self.render()
-        self.assertIn("| Native version | 4.2.8 |", text)
-        self.assertIn("| UI version | 1.2.10 |", text)
-        self.assertIn("| Repository version | v1.0.0 (release batch identity) |", text)
+        self.assertIn("| Product version | 1.0.2 |", text)
+        self.assertNotIn("| Native version |", text)
+        self.assertNotIn("| UI version |", text)
+        self.assertNotIn("| Repository version |", text)
         self.assertIn("b" * 64, text)
         self.assertIn("a" * 40, text)
-        self.assertIn("recorded", text)
+        self.assertIn("**PASS**", text)
+
+    def test_notes_do_not_list_internal_component_versions(self):
+        text = self.render()
+        # Native/UI internal versions must not be user-facing rows anywhere in
+        # the notes; they stay only in the attached provenance file.
+        self.assertNotIn("| Native version |", text)
+        self.assertNotIn("| UI version |", text)
+        self.assertNotIn("4.2.8", text)
+        self.assertNotIn("1.2.10", text)
+        self.assertIn("provenance", text)
+
+    def test_notes_mark_legacy_packages_unknown(self):
+        legacy = dict(PROVENANCE)
+        legacy.pop("product_version")
+        text = self.render(provenance=legacy, repo_version="v1.0.2")
+        self.assertIn("| Product version | unknown (legacy package; "
+                      "no trusted product metadata) |", text)
+        # Legacy packages are never presented as a guessed product version.
+        self.assertNotIn("v1.0.0", text)
+
+    def test_notes_refuse_release_version_product_mismatch(self):
+        with self.assertRaises(release_tool.ReleaseToolError):
+            self.render(repo_version="v1.0.3")
+        with self.assertRaises(release_tool.ReleaseToolError):
+            self.render(repo_version="v4.2.8")
+
+    def test_notes_reject_invalid_product_version_in_provenance(self):
+        broken = dict(PROVENANCE)
+        broken["product_version"] = "01.0.2"
+        with self.assertRaises(release_tool.ReleaseToolError):
+            self.render(provenance=broken)
+        broken["product_version"] = "1.0.01"
+        with self.assertRaises(release_tool.ReleaseToolError):
+            self.render(provenance=broken)
+        broken["product_version"] = "1.01.1"
+        with self.assertRaises(release_tool.ReleaseToolError):
+            self.render(provenance=broken)
+        broken["product_version"] = "0.9.9"
+        with self.assertRaises(release_tool.ReleaseToolError):
+            self.render(provenance=broken)
 
     def test_notes_reject_failed_verification(self):
         with self.assertRaises(release_tool.ReleaseToolError):
@@ -95,16 +137,33 @@ class RenderNotesTest(unittest.TestCase):
         with self.assertRaises(release_tool.ReleaseToolError):
             self.render(provenance=broken)
 
-    def test_notes_render_commits(self):
+    def test_notes_render_commits_and_limitations(self):
         commits = {"Added": ["feat: add x"], "Fixed": ["fix: y"]}
-        text = self.render(commits=commits)
+        text = self.render(commits=commits, limitations=["item one"])
         self.assertIn("#### Added", text)
         self.assertIn("- feat: add x", text)
         self.assertIn("#### Fixed", text)
-        self.assertIn("- fix: y", text)
+        self.assertIn("- item one", text)
 
     def test_notes_without_history_states_it(self):
         self.assertIn("No recorded commit history for this range.", self.render())
+
+    def test_limitations_fallback(self):
+        self.assertIn("- None recorded.", self.render())
+
+
+class KnownLimitationsTest(unittest.TestCase):
+    def test_parses_bullets_and_skips_headings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "limits.md"
+            path.write_text("# Known limitations\n\n- first\n- second\n",
+                            encoding="utf-8")
+            self.assertEqual(release_tool.load_known_limitations(path),
+                             ["first", "second"])
+
+    def test_missing_file_means_empty(self):
+        self.assertEqual(
+            release_tool.load_known_limitations(Path("/nonexistent/x.md")), [])
 
 
 class CheckConflictsTest(unittest.TestCase):
