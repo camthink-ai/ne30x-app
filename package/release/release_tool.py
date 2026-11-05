@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 VERSION_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+# Product version in provenance carries no "v" prefix (issue #6).
+PRODUCT_VERSION_RE = re.compile(r"^([1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 ADDED_PREFIXES = ("feat",)
 FIXED_PREFIXES = ("fix",)
@@ -51,7 +53,7 @@ def summarize_commits(subjects: list[str], max_commits: int = DEFAULT_MAX_COMMIT
 
 
 def render_notes(repo_version: str, provenance: dict, verification: dict,
-                 commits: dict[str, list[str]]) -> str:
+                 commits: dict[str, list[str]], known_limitations: list[str]) -> str:
     parse_version(repo_version)
     if verification.get("result") != "PASS":
         raise ReleaseToolError(
@@ -66,6 +68,24 @@ def render_notes(repo_version: str, provenance: dict, verification: dict,
     if missing:
         raise ReleaseToolError(f"provenance is missing: {', '.join(missing)}")
 
+    product_version = provenance.get("product_version")
+    if product_version:
+        if (not isinstance(product_version, str)
+                or PRODUCT_VERSION_RE.match(product_version) is None
+                or int(product_version.split(".", 1)[0]) < 1):
+            raise ReleaseToolError(
+                f"provenance product_version is not MAJOR.MINOR.PATCH with "
+                f"major >= 1: {product_version!r}")
+        if repo_version != f"v{product_version}":
+            raise ReleaseToolError(
+                f"release version {repo_version} does not match the package "
+                f"product version v{product_version}")
+        product_display = product_version
+    else:
+        # Packages without trusted product metadata are never mapped to a
+        # guessed version (issue #6: never presented as v1.0.0).
+        product_display = "unknown (legacy package; no trusted product metadata)"
+
     lines = [
         f"## line-crossing {repo_version}",
         "",
@@ -75,19 +95,21 @@ def render_notes(repo_version: str, provenance: dict, verification: dict,
         "",
         "| Field | Value |",
         "| --- | --- |",
-        f"| Repository version | {repo_version} (release batch identity) |",
+        f"| Product version | {product_display} |",
         f"| App ID | {provenance['app_id']} |",
-        f"| Native version | {'.'.join(str(x) for x in provenance['native_version'])} |",
-        f"| UI version | {'.'.join(str(x) for x in provenance['ui_version'])} |",
         f"| Package format | {provenance.get('format', 'neapp-v5-unsigned')} |",
         f"| Package size | {package_len} bytes |",
         f"| Package SHA-256 | `{package_sha}` |",
         f"| Source commit | `{provenance['source_commit']}` |",
         f"| Signing | {provenance.get('signing_dependencies', 'none')} |",
         "",
-        "Repository version, native version, and UI version are recorded",
-        "separately; they are different version lines and may carry equal or",
-        "different values.",
+        "The product version is the only user-facing version line; the",
+        "release title and file names use the same 1.0.x product version.",
+        "Native and UI component versions are internal build identity for",
+        "diagnostics and upgrade checks; they are recorded in the attached",
+        "provenance file and are not shown to users. Packages without",
+        "trusted product metadata are displayed as unknown legacy packages,",
+        "never as a guessed product version.",
         "",
         "### Changes",
         "",
@@ -104,7 +126,55 @@ def render_notes(repo_version: str, provenance: dict, verification: dict,
     else:
         lines.append("No recorded commit history for this range.")
         lines.append("")
+
+    host_policy = provenance.get("host_policy", {})
+    host_caps = host_policy.get("host_caps", "unrecorded")
+    if isinstance(host_caps, int):
+        host_caps = f"0x{host_caps:x}"
+    lines.extend([
+        "### Compatibility",
+        "",
+        f"- Host caps: `{host_caps}`",
+        f"- Resource quotas: event_max={host_policy.get('event_max', 'unrecorded')},"
+        f" state_quota={host_policy.get('state_quota', 'unrecorded')},"
+        f" control_max={host_policy.get('control_max', 'unrecorded')},"
+        f" snapshot_max={host_policy.get('snapshot_max', 'unrecorded')},"
+        f" report_max={host_policy.get('report_max', 'unrecorded')}",
+        f"- Verification boundary: `{provenance.get('verification_boundary', 'unrecorded')}`",
+        "- Requires device firmware with unsigned NEAPP05 admission enabled.",
+        "",
+        "### Verification",
+        "",
+        f"- Independent verifier result: **{verification['result']}**",
+        "- Verification report: attached as `*.verification.json`",
+        "- Build provenance: attached as `*.provenance.json`",
+        "",
+        "### Known limitations",
+        "",
+    ])
+    if known_limitations:
+        lines.extend(f"- {item}" for item in known_limitations)
+    else:
+        lines.append("- None recorded.")
+    lines.append("")
     return "\n".join(lines)
+
+
+def load_known_limitations(path: Path | None) -> list[str]:
+    if path is None or not path.is_file():
+        return []
+    items: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith(">"):
+            continue
+        if line.startswith("- "):
+            items.append(line[2:].strip())
+        elif items:
+            items[-1] = f"{items[-1]} {line}"
+        else:
+            items.append(line)
+    return items
 
 
 def gh(args: list[str]) -> tuple[int, str]:
@@ -191,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     notes.add_argument("--provenance", required=True, type=Path)
     notes.add_argument("--verification", required=True, type=Path)
     notes.add_argument("--out", required=True, type=Path)
+    notes.add_argument("--known-limitations", type=Path)
     notes.add_argument("--commits-file", type=Path,
                        help="one git subject per line; defaults to no history")
 
@@ -220,7 +291,8 @@ def main(argv: list[str] | None = None) -> int:
                             args.commits_file.read_text(encoding="utf-8")
                             .splitlines() if line.strip()]
             text = render_notes(args.repo_version, provenance, verification,
-                                summarize_commits(subjects))
+                                summarize_commits(subjects),
+                                load_known_limitations(args.known_limitations))
             args.out.write_text(text, encoding="utf-8")
             print(f"notes written: {args.out}")
         elif args.command == "check-conflicts":
